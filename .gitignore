@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+captures/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Signing material (never commit)
+keystore.properties
+keystore/
+*.jks
+*.keystore
+
+# Native build leftovers
+*.o
+*.obj
+app/src/main/obj/

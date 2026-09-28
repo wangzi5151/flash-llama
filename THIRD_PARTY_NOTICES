@@ -1,0 +1,14 @@
+Third-party components bundled in this application
+==================================================
+
+llama.cpp / ggml
+----------------
+The native runtime shipped in app/src/main/jniLibs/arm64-v8a comes from the
+llama.cpp project (https://github.com/ggml-org/llama.cpp), licensed under the
+MIT License.
+
+Copyright (c) 2023-2024 The ggml authors.
+
+The shared objects (libllama.so, libggml.so, libggml-base.so, libggml-cpu.so)
+and the libc++_shared.so runtime are redistributed unmodified from the Termux
+`llama-cpp` package.
