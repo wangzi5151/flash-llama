@@ -18,3 +18,6 @@ keystore/
 *.o
 *.obj
 app/src/main/obj/
+
+# Fetched/compiled llama.cpp source
+third_party/

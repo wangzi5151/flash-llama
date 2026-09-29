@@ -9,6 +9,8 @@
 #include <android/log.h>
 #include <dlfcn.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -32,6 +34,7 @@ struct Session {
     llama_model *       model = nullptr;
     llama_context *     ctx   = nullptr;
     const llama_vocab * vocab = nullptr;
+    FILE *              file  = nullptr; // kept open for lazily-read tensors
     int                 n_ctx = 0;
 
     std::atomic<bool> cancel{false};
@@ -40,23 +43,24 @@ struct Session {
 
 std::atomic<bool> g_backends_loaded{false};
 
-// The bundled llama.cpp/ggml objects are built against a newer libc++ than the
-// one shipped on some devices. libc++ moved std::hash's byte mixing into an
-// out-of-line `std::__ndk1::__hash_memory`, so provide it here. A single
-// process-wide definition keeps unordered containers consistent.
-extern "C" __attribute__((visibility("default"), used))
-size_t __flashllama_hash_memory(const void * ptr, size_t size)
-    __asm__("_ZNSt6__ndk113__hash_memoryEPKvm");
+std::mutex  g_log_mtx;
+std::string g_log_path;
 
-extern "C" __attribute__((visibility("default"), used))
-size_t __flashllama_hash_memory(const void * ptr, size_t size) {
-    const unsigned char * p = static_cast<const unsigned char *>(ptr);
-    size_t h = 1469598103934665603ULL; // FNV-1a
-    for (size_t i = 0; i < size; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ULL;
+void log_to_file(ggml_log_level level, const char * text, void * /*user_data*/) {
+    if (g_log_path.empty()) {
+        return;
     }
-    return h;
+    char lvl = 'I';
+    if (level == GGML_LOG_LEVEL_ERROR) lvl = 'E';
+    else if (level == GGML_LOG_LEVEL_WARN) lvl = 'W';
+    else if (level == GGML_LOG_LEVEL_DEBUG) lvl = 'D';
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    FILE * f = fopen(g_log_path.c_str(), "a");
+    if (f == nullptr) {
+        return;
+    }
+    fprintf(f, "[%c] %s", lvl, text);
+    fclose(f);
 }
 
 void ensure_backends(const char * dir) {
@@ -70,6 +74,21 @@ void ensure_backends(const char * dir) {
     } else {
         LOGI("loading ggml backends from default paths");
         ggml_backend_load_all();
+    }
+    LOGI("backend registries=%zu devices=%zu",
+         ggml_backend_reg_count(), ggml_backend_dev_count());
+
+    // Some Android linker namespaces refuse the directory scan; load the CPU
+    // backend by explicit path as a fallback.
+    if (ggml_backend_dev_count() == 0 && dir != nullptr && dir[0] != '\0') {
+        std::string cpu = std::string(dir) + "/libggml-cpu.so";
+        LOGW("no backend device found, explicit load: %s", cpu.c_str());
+        ggml_backend_load(cpu.c_str());
+        LOGI("after explicit load registries=%zu devices=%zu",
+             ggml_backend_reg_count(), ggml_backend_dev_count());
+    }
+    if (ggml_backend_dev_count() == 0) {
+        LOGE("no ggml backend device available!");
     }
 }
 
@@ -248,6 +267,7 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeInit(
     mp.n_gpu_layers = nGpuLayers;
     mp.load_mode    = mLock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP;
 
+    LOGI("loading model from %s (threads=%d ctx=%d batch=%d)", modelPath.c_str(), nThreads, nCtx, nBatch);
     s->model = llama_model_load_from_file(modelPath.c_str(), mp);
     if (s->model == nullptr) {
         LOGE("failed to load model: %s", modelPath.c_str());
@@ -287,6 +307,93 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeInit(
 }
 
 JNIEXPORT void JNICALL
+Java_com_wangzi5151_flashllama_LlamaBridge_nativeSetLogPath(
+        JNIEnv * env, jobject /*thiz*/, jstring jpath) {
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    g_log_path = jstring_to_utf8(env, jpath);
+    llama_log_set(log_to_file, nullptr);
+}
+
+namespace {
+
+llama_context * make_context(Session * s, int nThreads, int nCtx, int nBatch, jint kvType) {
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx           = static_cast<uint32_t>(nCtx > 0 ? nCtx : 4096);
+    cp.n_batch         = static_cast<uint32_t>(nBatch > 0 ? nBatch : 512);
+    cp.n_ubatch        = cp.n_batch;
+    cp.n_threads       = nThreads;
+    cp.n_threads_batch = nThreads;
+    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cp.no_perf         = true;
+    cp.abort_callback      = abort_cb;
+    cp.abort_callback_data = s;
+
+    const ggml_type kvt = kv_type_from_int(kvType);
+    if (kvt != GGML_TYPE_COUNT) {
+        cp.type_k = kvt;
+        cp.type_v = kvt;
+    }
+    return llama_init_from_model(s->model, cp);
+}
+
+} // namespace
+
+// Loads a model from an already-open file descriptor (SAF / content:// URIs).
+// Re-opening /proc/self/fd/N is unreliable inside the app sandbox, so hand the
+// fd straight to llama.cpp instead.
+JNIEXPORT jlong JNICALL
+Java_com_wangzi5151_flashllama_LlamaBridge_nativeInitFd(
+        JNIEnv * env, jobject /*thiz*/, jint fd, jstring jlibDir,
+        jint nThreads, jint nCtx, jint nBatch, jint nGpuLayers, jboolean mLock, jint kvType) {
+
+    const std::string libDir = jstring_to_utf8(env, jlibDir);
+    ensure_backends(libDir.c_str());
+    llama_backend_init();
+
+    auto * s = new Session();
+
+    llama_model_params mp = llama_model_default_params();
+    mp.n_gpu_layers = nGpuLayers;
+    mp.load_mode    = mLock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP;
+
+    const int dfd = dup(fd);
+    if (dfd < 0) {
+        LOGE("dup(fd=%d) failed", fd);
+        delete s;
+        return 0;
+    }
+    s->file = fdopen(dfd, "rb");
+    if (s->file == nullptr) {
+        LOGE("fdopen(fd=%d) failed", dfd);
+        close(dfd);
+        delete s;
+        return 0;
+    }
+
+    LOGI("loading model from fd=%d (threads=%d ctx=%d batch=%d)", fd, nThreads, nCtx, nBatch);
+    s->model = llama_model_load_from_file_ptr(s->file, mp);
+    if (s->model == nullptr) {
+        LOGE("failed to load model from fd=%d", fd);
+        fclose(s->file);
+        delete s;
+        return 0;
+    }
+    s->vocab = llama_model_get_vocab(s->model);
+
+    s->ctx = make_context(s, nThreads, nCtx, nBatch, kvType);
+    if (s->ctx == nullptr) {
+        LOGE("failed to create context (fd path)");
+        llama_model_free(s->model);
+        fclose(s->file);
+        delete s;
+        return 0;
+    }
+    s->n_ctx = static_cast<int>(llama_n_ctx(s->ctx));
+    LOGI("model ready (fd path): n_ctx=%d", s->n_ctx);
+    return reinterpret_cast<jlong>(s);
+}
+
+JNIEXPORT void JNICALL
 Java_com_wangzi5151_flashllama_LlamaBridge_nativeFree(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
     auto * s = reinterpret_cast<Session *>(handle);
     if (s == nullptr) {
@@ -297,6 +404,9 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeFree(JNIEnv * /*env*/, jobject 
     }
     if (s->model != nullptr) {
         llama_model_free(s->model);
+    }
+    if (s->file != nullptr) {
+        fclose(s->file);
     }
     delete s;
 }

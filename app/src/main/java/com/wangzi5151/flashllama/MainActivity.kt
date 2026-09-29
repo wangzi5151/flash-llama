@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -60,23 +61,35 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wangzi5151.flashllama.ui.FlashLlamaTheme
 
 class MainActivity : ComponentActivity() {
+
+    private val vm: ChatViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val data = intent?.data
+        if (data != null && (data.scheme == "content" || data.scheme == "file")) {
+            vm.loadModel(data)
+        } else {
+            intent?.getStringExtra(EXTRA_MODEL_PATH)?.let { vm.loadModelFromPath(it) }
+        }
         setContent {
             FlashLlamaTheme {
-                AppScreen()
+                AppScreen(vm)
             }
         }
+    }
+
+    companion object {
+        const val EXTRA_MODEL_PATH = "modelPath"
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppScreen(vm: ChatViewModel = viewModel()) {
+private fun AppScreen(vm: ChatViewModel) {
     val messages by vm.messages.collectAsStateWithLifecycle()
     val params by vm.params.collectAsStateWithLifecycle()
     val info by vm.modelInfo.collectAsStateWithLifecycle()

@@ -15,9 +15,24 @@ object LlamaBridge {
         System.loadLibrary("ggufjni")
     }
 
+    /** Routes llama.cpp/ggml log output to the given file. */
+    external fun nativeSetLogPath(path: String)
+
     /** Loads a model and creates a reusable context. Returns a handle, or 0 on failure. */
     external fun nativeInit(
         modelPath: String,
+        libDir: String,
+        nThreads: Int,
+        nCtx: Int,
+        nBatch: Int,
+        nGpuLayers: Int,
+        mLock: Boolean,
+        kvType: Int,
+    ): Long
+
+    /** Same as [nativeInit] but reads from an already-open file descriptor. */
+    external fun nativeInitFd(
+        fd: Int,
         libDir: String,
         nThreads: Int,
         nCtx: Int,

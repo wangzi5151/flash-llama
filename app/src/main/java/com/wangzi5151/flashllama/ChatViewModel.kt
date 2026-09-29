@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -50,15 +51,14 @@ data class ModelInfo(
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
+    private val TAG = "FlashLlama"
     private val contentResolver: ContentResolver = app.contentResolver
     private val nativeLibDir: String = app.applicationInfo.nativeLibraryDir
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
-    private val _params = MutableStateFlow(
-        GenParams(nThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8))
-    )
+    private val _params = MutableStateFlow(GenParams(nThreads = defaultThreadCount()))
     val params: StateFlow<GenParams> = _params.asStateFlow()
 
     private val _modelInfo = MutableStateFlow<ModelInfo?>(null)
@@ -101,10 +101,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 modelPfd = newPfd
 
                 val p = _params.value
-                val h = LlamaBridge.nativeInit(
-                    resolved.first, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
-                    nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
-                )
+                LlamaBridge.nativeSetLogPath(logFilePath())
+                diag("loadModel resolved=${resolved.first} pfd=${newPfd != null}")
+
+                var h = 0L
+                if (newPfd != null) {
+                    h = LlamaBridge.nativeInitFd(
+                        newPfd.fd, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
+                        nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                    )
+                    if (h == 0L) {
+                        // Some providers do not support loading straight from the fd.
+                        diag("fd load failed, copying to cache and retrying")
+                        newPfd.close()
+                        newPfd = null
+                        val copied = copyToCache(uri)
+                        if (copied != null) {
+                            h = LlamaBridge.nativeInit(
+                                copied.absolutePath, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
+                                nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                            )
+                        }
+                    }
+                } else {
+                    h = LlamaBridge.nativeInit(
+                        resolved.first, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
+                        nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                    )
+                }
+                modelPfd = newPfd
+                diag("native init returned handle=$h")
                 if (h == 0L) {
                     _status.value = "模型加载失败，请确认是有效的 GGUF 文件"
                     newPfd?.close()
@@ -116,6 +142,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     _messages.value = emptyList()
                 }
             } catch (t: Throwable) {
+                Log.e(TAG, "load failed", t)
+                diag("EXCEPTION ${t.javaClass.name}: ${t.message}")
+                t.stackTrace.take(6).forEach { diag("  at $it") }
                 _status.value = "加载出错：${t.message}"
                 newPfd?.close()
                 modelPfd = null
@@ -123,6 +152,68 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _loading.value = false
             }
         }
+    }
+
+    /** Loads a model from an absolute filesystem path (used by automation / "open with"). */
+    fun loadModelFromPath(path: String) {
+        if (_loading.value || _generating.value) return
+        _loading.value = true
+        _speed.value = ""
+        _status.value = "正在加载模型…"
+        Log.i(TAG, "loadModelFromPath: $path")
+        diag("loadModelFromPath path=$path nativeLibDir=$nativeLibDir")
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                withContext(Dispatchers.Main) { releaseHandle() }
+                val p = _params.value
+                LlamaBridge.nativeSetLogPath(logFilePath())
+                val h = LlamaBridge.nativeInit(
+                    path, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
+                    nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                )
+                diag("nativeInit returned handle=$h")
+                if (h == 0L) {
+                    _status.value = "模型加载失败，请确认是有效的 GGUF 文件"
+                } else {
+                    handle = h
+                    _modelInfo.value = parseInfo(File(path).name, LlamaBridge.nativeInfo(h))
+                    _status.value = "模型已就绪"
+                    _messages.value = emptyList()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "load failed", t)
+                diag("EXCEPTION ${t.javaClass.name}: ${t.message}")
+                t.stackTrace.take(6).forEach { diag("  at $it") }
+                _status.value = "加载出错：${t.message}"
+            } finally {
+                _loading.value = false
+            }
+        }
+    }
+
+    private fun diag(msg: String) {
+        try {
+            val dir = getApplication<Application>().getExternalFilesDir(null) ?: return
+            File(dir, "diag.txt").appendText(msg + "\n")
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun logFilePath(): String {
+        val dir = getApplication<Application>().getExternalFilesDir(null)
+        return File(dir ?: getApplication<Application>().cacheDir, "llama.log").absolutePath
+    }
+
+    private fun copyToCache(uri: Uri): File? = try {
+        val dst = File(getApplication<Application>().cacheDir, "model.gguf")
+        contentResolver.openInputStream(uri)?.use { input ->
+            dst.outputStream().use { output -> input.copyTo(output) }
+        }
+        diag("copied model to ${dst.absolutePath} (${dst.length()} bytes)")
+        dst
+    } catch (t: Throwable) {
+        diag("copy failed: ${t.message}")
+        null
     }
 
     fun send(input: String) {
@@ -275,6 +366,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         releaseHandle()
         super.onCleared()
+    }
+}
+
+/**
+ * Picks a sensible thread count: the number of "big" CPU cores based on their
+ * max frequency. Oversubscribing little cores makes llama.cpp much slower.
+ */
+fun defaultThreadCount(): Int {
+    return try {
+        val freqs = File("/sys/devices/system/cpu")
+            .listFiles { f -> f.name.matches(Regex("cpu\\d+")) }
+            ?.mapNotNull { cpu ->
+                File(cpu, "cpufreq/cpuinfo_max_freq")
+                    .takeIf { it.exists() }
+                    ?.readText()?.trim()?.toLongOrNull()
+            }
+            ?: emptyList()
+        if (freqs.isEmpty()) {
+            Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        } else {
+            val max = freqs.max()
+            freqs.count { it >= max * 9 / 10 }.coerceIn(2, 8)
+        }
+    } catch (_: Throwable) {
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     }
 }
 

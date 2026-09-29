@@ -27,15 +27,22 @@ Flash-Attention 加速。
 
 ## 🧠 性能说明
 
-实测（内部测试，Llama-3.2-1B-Instruct Q4_K_M，4 线程）：
+运行库是**在设备上原生编译**的（`GGML_NATIVE=ON`），CPU 后端会带上本机 SoC
+支持的指令集（NEON / dotprod / fp16 …）。相比通用预编译包，量化矩阵乘可以快
+**2～2.5 倍**。
 
-| 阶段 | 耗时 |
+实测（联发科 MT6878 / Dimensity 7300，Llama-3.2-1B-Instruct Q4_K_M，约 0.76GB）：
+
+| 配置 | 生成速度 |
 | --- | --- |
-| 冷启动加载模型（mmap，800MB） | 数秒 |
-| 生成 24 tokens | < 1 秒 |
+| 2 线程 + Flash-Attention | ~14.5 tok/s |
+| 4 线程 + Flash-Attention | ~13 tok/s |
+| 8 线程（错误示范） | ~1.5 tok/s |
 
-实际速度取决于 SoC 与模型大小。建议使用 `Q4_K_M` 量化，配合设备大核线程数
-（一般 4~6 线程最优）。
+> 线程数并非越多越快：超过大核数量后会互相抢核、明显掉速。应用默认取「大核频率
+> 对应的核心数」。
+
+实际速度取决于 SoC 与模型大小。建议使用 `Q4_K_M` 量化。
 
 ## 🏗️ 架构
 
@@ -56,12 +63,10 @@ app/src/main/
     └── libc++_shared.so
 ```
 
-- `libggml.so` 通过动态后端机制加载 `libggml-cpu.so`。应用启动时由 JNI 调用
-  `ggml_backend_load_all_from_path(<nativeLibraryDir>)` 完成注册，因此 APK
-  设置了 `android:extractNativeLibs="true"` 以得到真实的库目录。
-- 运行库编译使用的 libc++ 比部分设备的系统版本更新，缺少
-  `std::__ndk1::__hash_memory`，`gguf_jni.cpp` 内提供了一个进程内一致的实现，
-  避免加载失败。
+- `libggml.so` 依赖 `libggml-cpu.so`，CPU 后端在库加载时自动注册。JNI 仍会
+  调用 `ggml_backend_load_all_from_path(<nativeLibraryDir>)` 以兼容动态后端
+  构建；APK 设置了 `android:extractNativeLibs="true"` 以得到真实的库目录。
+- `libc++_shared.so` 随构建工具链一起打包，保证与运行库 ABI 完全匹配。
 
 ## 🔧 构建
 
@@ -70,17 +75,22 @@ app/src/main/
 需要 Android SDK（build-tools、platform 34）、JDK 17+。
 
 ```bash
-pkg install -y llama-cpp cmake ninja openjdk-17
+pkg install -y cmake ninja patchelf python openjdk-17
 ```
 
-1. 编译 JNI 并收集运行库：
+1. 构建原生运行库（从源码编译，带本机 CPU 优化）：
 
    ```bash
    ./build_native.sh
    ```
 
-   脚本会用 Termux 的 clang 编译 `gguf_jni.cpp`，并把 `llama-cpp` 包提供的
-   `libllama.so` 等运行库拷贝到 `app/src/main/jniLibs/arm64-v8a/`。
+   脚本会通过 PyPI 拉取 llama.cpp 源码（`llama-cpp-python` 的 sdist 内置完整
+   源码），用 Termux clang 以 `GGML_NATIVE=ON` 编译出 `libllama.so` /
+   `libggml*.so`，修正 soname 后连同 JNI 桥一起放入
+   `app/src/main/jniLibs/arm64-v8a/`。
+
+   > 首次构建会下载约 75MB 源码并编译数分钟。由于使用 `GGML_NATIVE`，请在你
+   > 要运行的设备（或同架构设备）上编译以获得最佳指令集。
 
 2. 配置 `local.properties`：
 
