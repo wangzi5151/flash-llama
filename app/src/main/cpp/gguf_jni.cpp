@@ -47,13 +47,12 @@ std::mutex  g_log_mtx;
 std::string g_log_path;
 
 void log_to_file(ggml_log_level level, const char * text, void * /*user_data*/) {
-    if (g_log_path.empty()) {
+    // Only persist warnings/errors: llama.cpp emits a flood of DEBUG lines per
+    // graph node, and writing each one to disk would dominate decode time.
+    if (g_log_path.empty() || (level != GGML_LOG_LEVEL_WARN && level != GGML_LOG_LEVEL_ERROR)) {
         return;
     }
-    char lvl = 'I';
-    if (level == GGML_LOG_LEVEL_ERROR) lvl = 'E';
-    else if (level == GGML_LOG_LEVEL_WARN) lvl = 'W';
-    else if (level == GGML_LOG_LEVEL_DEBUG) lvl = 'D';
+    char lvl = level == GGML_LOG_LEVEL_ERROR ? 'E' : 'W';
     std::lock_guard<std::mutex> lock(g_log_mtx);
     FILE * f = fopen(g_log_path.c_str(), "a");
     if (f == nullptr) {
@@ -445,6 +444,30 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeInfo(JNIEnv * env, jobject /*th
                   llama_vocab_n_tokens(s->vocab),
                   s->n_ctx,
                   llama_version());
+    return utf8_to_jstring(env, out);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_wangzi5151_flashllama_LlamaBridge_nativeDevices(JNIEnv * env, jobject /*thiz*/) {
+    std::string out;
+    const size_t n = ggml_backend_dev_count();
+    for (size_t i = 0; i < n; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev == nullptr) {
+            continue;
+        }
+        const char * name = ggml_backend_dev_name(dev);
+        const char * desc = ggml_backend_dev_description(dev);
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += name != nullptr ? name : "?";
+        if (desc != nullptr && desc[0] != '\0') {
+            out += " (";
+            out += desc;
+            out += ")";
+        }
+    }
     return utf8_to_jstring(env, out);
 }
 

@@ -51,6 +51,9 @@ object LlamaBridge {
     /** Returns "desc|nParams|size|nCtxTrain|nVocab|nCtx|version". */
     external fun nativeInfo(handle: Long): String
 
+    /** Comma separated list of available ggml devices (CPU, Vulkan, ...). */
+    external fun nativeDevices(): String
+
     /** Applies the model's built-in chat template (falls back to ChatML). */
     external fun nativeApplyChatTemplate(
         handle: Long,

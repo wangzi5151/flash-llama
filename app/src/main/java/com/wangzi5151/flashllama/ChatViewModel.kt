@@ -26,7 +26,7 @@ data class ChatMessage(
 data class GenParams(
     val nThreads: Int,
     val nCtx: Int = 4096,
-    val nBatch: Int = 512,
+    val nBatch: Int = 256,
     val temperature: Float = 0.7f,
     val topK: Int = 40,
     val topP: Float = 0.95f,
@@ -34,6 +34,7 @@ data class GenParams(
     val repeatPenalty: Float = 1.1f,
     val maxTokens: Int = 512,
     val kvType: Int = 0, // 0 = f16, 2 = q8_0, 3 = q4_0
+    val gpuLayers: Int = 0, // 0 = CPU only, 99 = offload everything (experimental)
     val useMlock: Boolean = false,
     val useChatTemplate: Boolean = true,
 )
@@ -78,6 +79,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private var handle: Long = 0L
     private var modelPfd: ParcelFileDescriptor? = null
+    private var pendingPrompt: String? = null
+
+    /** Queues a prompt to be sent automatically once the current model is ready. */
+    fun queuePrompt(prompt: String) {
+        pendingPrompt = prompt
+    }
 
     val isReady: Boolean get() = handle != 0L
 
@@ -108,7 +115,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (newPfd != null) {
                     h = LlamaBridge.nativeInitFd(
                         newPfd.fd, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
-                        nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                        nGpuLayers = p.gpuLayers, mLock = p.useMlock, kvType = p.kvType,
                     )
                     if (h == 0L) {
                         // Some providers do not support loading straight from the fd.
@@ -119,14 +126,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         if (copied != null) {
                             h = LlamaBridge.nativeInit(
                                 copied.absolutePath, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
-                                nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                                nGpuLayers = p.gpuLayers, mLock = p.useMlock, kvType = p.kvType,
                             )
                         }
                     }
                 } else {
                     h = LlamaBridge.nativeInit(
                         resolved.first, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
-                        nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                        nGpuLayers = p.gpuLayers, mLock = p.useMlock, kvType = p.kvType,
                     )
                 }
                 modelPfd = newPfd
@@ -137,6 +144,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     modelPfd = null
                 } else {
                     handle = h
+                    diag("devices=" + LlamaBridge.nativeDevices())
                     _modelInfo.value = parseInfo(name, LlamaBridge.nativeInfo(h))
                     _status.value = "模型已就绪"
                     _messages.value = emptyList()
@@ -169,16 +177,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 LlamaBridge.nativeSetLogPath(logFilePath())
                 val h = LlamaBridge.nativeInit(
                     path, nativeLibDir, p.nThreads, p.nCtx, p.nBatch,
-                    nGpuLayers = 0, mLock = p.useMlock, kvType = p.kvType,
+                    nGpuLayers = p.gpuLayers, mLock = p.useMlock, kvType = p.kvType,
                 )
                 diag("nativeInit returned handle=$h")
                 if (h == 0L) {
                     _status.value = "模型加载失败，请确认是有效的 GGUF 文件"
                 } else {
                     handle = h
+                    diag("devices=" + LlamaBridge.nativeDevices())
                     _modelInfo.value = parseInfo(File(path).name, LlamaBridge.nativeInfo(h))
                     _status.value = "模型已就绪"
                     _messages.value = emptyList()
+                    pendingPrompt?.let { p -> pendingPrompt = null; send(p) }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "load failed", t)
@@ -255,6 +265,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 publishAssistant(assistantIndex, buffer.toString(), streaming = false)
                 val tps = tokenCount * 1000f / elapsed
                 _speed.value = "%.1f tok/s · %d tokens".format(tps, tokenCount)
+                diag("gen tokens=$tokenCount elapsedMs=$elapsed tps=%.2f".format(tps))
                 _generating.value = false
             }
         }
