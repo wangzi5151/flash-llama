@@ -25,18 +25,34 @@ BUILD="$THIRD_PARTY/build-android"
 CXX="$PREFIX/bin/clang++"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 
+# Pinned for reproducible builds. The sdist filename and its SHA-256 are checked
+# so a compromised/mutated mirror cannot silently swap the vendored llama.cpp.
+LLAMA_CPP_PY_VERSION="0.3.36"
+LLAMA_CPP_PY_SHA256="832db0699007f1be95a7e41ef12e88926b02ba836461e36a36372db2760c1a2e"
+LLAMA_CPP_PY_SDIST="$THIRD_PARTY/dl/llama_cpp_python-${LLAMA_CPP_PY_VERSION}.tar.gz"
+
 # ---------------------------------------------------------------------------
 # 1. Fetch the llama.cpp source. PyPI is a fast, reliable mirror because the
 #    llama-cpp-python sdist vendors the full llama.cpp tree.
 # ---------------------------------------------------------------------------
 if [ ! -f "$LLAMA_SRC/include/llama.h" ]; then
-    echo ">> fetching llama.cpp source via PyPI"
+    echo ">> fetching llama.cpp source via PyPI (llama-cpp-python ${LLAMA_CPP_PY_VERSION})"
     mkdir -p "$THIRD_PARTY/dl"
-    python -m pip download --no-deps --no-binary :all: \
-        --dest "$THIRD_PARTY/dl" llama-cpp-python
-    tar xzf "$THIRD_PARTY/dl/"*.tar.gz -C "$THIRD_PARTY/dl"
+    if [ ! -f "$LLAMA_CPP_PY_SDIST" ]; then
+        python -m pip download --no-deps --no-binary :all: \
+            --dest "$THIRD_PARTY/dl" "llama-cpp-python==${LLAMA_CPP_PY_VERSION}"
+    fi
+    echo "${LLAMA_CPP_PY_SHA256}  ${LLAMA_CPP_PY_SDIST}" | sha256sum -c -
+    EXTRACT_DIR="$THIRD_PARTY/dl/src"
+    rm -rf "$EXTRACT_DIR"
+    mkdir -p "$EXTRACT_DIR"
+    tar xzf "$LLAMA_CPP_PY_SDIST" -C "$EXTRACT_DIR"
     rm -rf "$LLAMA_SRC"
-    mv "$THIRD_PARTY/dl/"*/vendor/llama.cpp "$LLAMA_SRC"
+    mv "$EXTRACT_DIR/llama_cpp_python-${LLAMA_CPP_PY_VERSION}/vendor/llama.cpp" "$LLAMA_SRC"
+    if [ ! -f "$LLAMA_SRC/include/llama.h" ]; then
+        echo "!! vendored llama.cpp source is missing or incomplete" >&2
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------

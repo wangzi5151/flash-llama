@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -38,7 +39,50 @@ struct Session {
     int                 n_ctx = 0;
 
     std::atomic<bool> cancel{false};
-    std::mutex        mtx;
+
+    // Serializes llama_decode/sampler work. Held for the whole generation.
+    std::mutex gen_mtx;
+
+    // Reference count for every operation that dereferences the session.
+    // nativeFree flips `closing` and waits for `active` to reach zero before
+    // deleting the model/context, so an in-flight generate can never touch
+    // freed memory.
+    std::mutex              state_mtx;
+    std::condition_variable idle_cv;
+    int                     active = 0;
+    bool                    closing = false;
+};
+
+// RAII lease: registering before touching the session and checking `closing`
+// closes the race between nativeFree() and any native call on the same handle.
+struct SessionLease {
+    explicit SessionLease(Session * s) : s_(s) {
+        if (s_ == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(s_->state_mtx);
+        if (s_->closing) {
+            return;
+        }
+        ++s_->active;
+        ok_ = true;
+    }
+
+    ~SessionLease() {
+        if (!ok_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(s_->state_mtx);
+        if (--s_->active == 0) {
+            s_->idle_cv.notify_all();
+        }
+    }
+
+    bool ok() const { return ok_; }
+
+private:
+    Session * s_;
+    bool      ok_ = false;
 };
 
 std::atomic<bool> g_backends_loaded{false};
@@ -398,6 +442,16 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeFree(JNIEnv * /*env*/, jobject 
     if (s == nullptr) {
         return;
     }
+
+    // Stop any running decode, then wait until every native call that is using
+    // this session has returned. Only then is it safe to destroy model/context.
+    {
+        std::unique_lock<std::mutex> lock(s->state_mtx);
+        s->closing = true;
+        s->cancel.store(true);
+        s->idle_cv.wait(lock, [s] { return s->active == 0; });
+    }
+
     if (s->ctx != nullptr) {
         llama_free(s->ctx);
     }
@@ -413,7 +467,11 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeFree(JNIEnv * /*env*/, jobject 
 JNIEXPORT void JNICALL
 Java_com_wangzi5151_flashllama_LlamaBridge_nativeCancel(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
     auto * s = reinterpret_cast<Session *>(handle);
-    if (s != nullptr) {
+    if (s == nullptr) {
+        return;
+    }
+    SessionLease lease(s);
+    if (lease.ok()) {
         s->cancel.store(true);
     }
 }
@@ -421,16 +479,31 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeCancel(JNIEnv * /*env*/, jobjec
 JNIEXPORT void JNICALL
 Java_com_wangzi5151_flashllama_LlamaBridge_nativeReset(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
     auto * s = reinterpret_cast<Session *>(handle);
-    if (s != nullptr && s->ctx != nullptr) {
-        std::lock_guard<std::mutex> lock(s->mtx);
-        llama_memory_clear(llama_get_memory(s->ctx), true);
+    if (s == nullptr) {
+        return;
     }
+    SessionLease lease(s);
+    if (!lease.ok() || s->ctx == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> gen(s->gen_mtx);
+    {
+        std::lock_guard<std::mutex> state(s->state_mtx);
+        if (s->closing) {
+            return;
+        }
+    }
+    llama_memory_clear(llama_get_memory(s->ctx), true);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_wangzi5151_flashllama_LlamaBridge_nativeInfo(JNIEnv * env, jobject /*thiz*/, jlong handle) {
     auto * s = reinterpret_cast<Session *>(handle);
-    if (s == nullptr || s->model == nullptr) {
+    if (s == nullptr) {
+        return env->NewStringUTF("");
+    }
+    SessionLease lease(s);
+    if (!lease.ok() || s->model == nullptr) {
         return env->NewStringUTF("");
     }
     char desc[256] = {0};
@@ -477,7 +550,11 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeApplyChatTemplate(
         jobjectArray roles, jobjectArray contents, jboolean addAss) {
 
     auto * s = reinterpret_cast<Session *>(handle);
-    if (s == nullptr || s->model == nullptr) {
+    if (s == nullptr) {
+        return env->NewStringUTF("");
+    }
+    SessionLease lease(s);
+    if (!lease.ok() || s->model == nullptr) {
         return env->NewStringUTF("");
     }
 
@@ -520,12 +597,23 @@ Java_com_wangzi5151_flashllama_LlamaBridge_nativeGenerate(
         jfloat repeatPenalty, jint repeatLastN, jint seed, jobject callback) {
 
     auto * s = reinterpret_cast<Session *>(handle);
-    if (s == nullptr || s->ctx == nullptr) {
+    if (s == nullptr) {
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(s->mtx);
-    s->cancel.store(false);
+    SessionLease lease(s);
+    if (!lease.ok() || s->ctx == nullptr) {
+        return -1;
+    }
+
+    std::lock_guard<std::mutex> lock(s->gen_mtx);
+    {
+        std::lock_guard<std::mutex> state(s->state_mtx);
+        if (s->closing) {
+            return -4;
+        }
+        s->cancel.store(false);
+    }
 
     const std::string prompt = jstring_to_utf8(env, jprompt);
 

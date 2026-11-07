@@ -87,7 +87,8 @@ pkg install -y cmake ninja patchelf python openjdk-17
    脚本会通过 PyPI 拉取 llama.cpp 源码（`llama-cpp-python` 的 sdist 内置完整
    源码），用 Termux clang 以 `GGML_NATIVE=ON` 编译出 `libllama.so` /
    `libggml*.so`，修正 soname 后连同 JNI 桥一起放入
-   `app/src/main/jniLibs/arm64-v8a/`。
+   `app/src/main/jniLibs/arm64-v8a/`。为保证可复现，脚本固定
+   `llama-cpp-python==0.3.36` 并校验 sdist 的 SHA-256。
 
    > 首次构建会下载约 75MB 源码并编译数分钟。由于使用 `GGML_NATIVE`，请在你
    > 要运行的设备（或同架构设备）上编译以获得最佳指令集。
@@ -108,10 +109,32 @@ pkg install -y cmake ninja patchelf python openjdk-17
    > `gradle.properties` 中设置 `android.aapt2FromMavenOverride` 指向 Termux
    > 的 aapt2，或 `pkg install aapt`。本仓库已包含该配置。
 
+4. 运行 JVM 单元测试（Termux 示例）：
+
+   ```bash
+   export ANDROID_HOME=/data/data/com.termux/files/home/android-sdk
+   ./gradlew testDebugUnitTest \
+     -Pandroid.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
+   ```
+
+   纯逻辑单测位于 `app/src/test/`，覆盖 prompt 组装、模型信息解析、容量格式化
+   和大核线程数选择，不需要设备或模型文件。
+
 ### 方式二：Android Studio / 标准 NDK
 
 标准环境也可直接构建，只要 `jniLibs/arm64-v8a/` 中已有运行库；
 本项目默认不启用 `externalNativeBuild`，JNI 由 `build_native.sh` 预先编译。
+
+## ✅ 测试与 CI
+
+- `.github/workflows/android-unit-tests.yml`：在每次 push / PR 时运行
+  `./gradlew testDebugUnitTest`，并上传测试报告。
+- `.github/workflows/native-build.yml`：`workflow_dispatch` 手动触发。原生运行库
+  依赖 Termux clang 与 `GGML_NATIVE=ON` 的本机指令集优化，因此在自托管
+  ARM64 Linux/Termux runner 上执行 `./build_native.sh`；GitHub 托管 runner 不
+  构建原生库，仓库内仍提交了可直接打包的 `jniLibs/arm64-v8a/`。
+
+本地只需要 JVM 单测时，无需安装 NDK 或连接设备。
 
 ## 📱 使用
 
@@ -126,6 +149,11 @@ pkg install -y cmake ninja patchelf python openjdk-17
 - 仅打包 `arm64-v8a`（绝大多数现代 Android 手机）。
 - 分片（split）GGUF 暂不支持通过 SAF 直接加载，请使用单文件模型。
 - 未启用 GPU / NPU 后端；纯 CPU 推理，兼容性最好、功耗可控。
+- 生成过程中卸载模型或退出应用会先取消生成本次推理、等待原生调用返回，再释放
+  context；若底层 decode 无法及时中断，释放会被相应推迟，但不会出现释放后仍
+  在推理的 UAF。
+- GitHub 托管 CI 只运行 JVM 单测；原生库的可复现构建需在 Termux/ARM64 设备上
+  执行（见「测试与 CI」）。
 
 ## 📄 许可
 

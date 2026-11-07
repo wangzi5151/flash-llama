@@ -1,0 +1,26 @@
+name: Native runtime build (manual)
+
+# The native runtime is built on the target device with Termux clang and
+# GGML_NATIVE=ON (host-specific NEON/dotprod tuning). That is too heavy and too
+# device-specific for GitHub-hosted runners, so this build is manual and expects
+# a self-hosted ARM64 Linux/Termux runner with the packages listed in README.md.
+#
+# The JVM unit tests run automatically in android-unit-tests.yml.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-native:
+    runs-on: [self-hosted, linux, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate build script
+        run: bash -n build_native.sh
+
+      - name: Build llama.cpp + JNI bridge
+        run: ./build_native.sh
+
+      - name: Run JVM unit tests
+        run: ./gradlew testDebugUnitTest
