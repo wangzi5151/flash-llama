@@ -4,6 +4,18 @@ All notable changes to FlashLlama are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- README: CI / license badges, an English summary, a model download &
+  selection guide (where to get GGUF files, Q4_K_M size vs. device RAM
+  table, why split files won't load), and explicit device requirements
+  (Android 8.0+, arm64-v8a) in the usage section.
+- `CONTRIBUTING.md` (native-library build constraints, how to run the
+  JVM unit tests, what to include in issues) and `SECURITY.md`
+  (vulnerability reporting, trusted-model guidance).
+- Repository topics: android, gguf, jni, kotlin, llama-cpp, llm,
+  on-device-ai.
+
 ### Fixed
 
 - Prevent use-after-free when a model is unloaded while a generation is still
