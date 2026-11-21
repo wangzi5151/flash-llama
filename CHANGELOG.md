@@ -18,6 +18,12 @@ All notable changes to FlashLlama are documented here.
 
 ### Fixed
 
+- `gradle.properties` no longer hardcodes the Termux-local
+  `android.aapt2FromMavenOverride` path. That path only exists on the
+  maintainer's Termux device, so GitHub-hosted CI always failed in
+  `:app:processDebugResources` ("Specified AAPT2 executable does not
+  exist"). Termux builds now pass it via `~/.gradle/gradle.properties`
+  or `-P` on the command line, as the README's test example already did.
 - Prevent use-after-free when a model is unloaded while a generation is still
   running: `unload()` / `onCleared()` now cancel the native decode, wait for the
   in-flight JNI call, and only then call `nativeFree()`.

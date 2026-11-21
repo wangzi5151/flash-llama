@@ -116,9 +116,12 @@ pkg install -y cmake ninja patchelf python openjdk-17
    ./gradlew :app:assembleRelease
    ```
 
-   > 在 Termux aarch64 上，Gradle 自带的 `aapt2`（x86_64）无法运行，需在
-   > `gradle.properties` 中设置 `android.aapt2FromMavenOverride` 指向 Termux
-   > 的 aapt2，或 `pkg install aapt`。本仓库已包含该配置。
+   > 在 Termux aarch64 上，Gradle 自带的 `aapt2`（x86_64）无法运行，需让
+   > `android.aapt2FromMavenOverride` 指向 Termux 的 aapt2。**不要写进仓库的
+   > `gradle.properties`**——那是本机路径，写死后 GitHub 托管 CI 找不到这个
+   > 文件必然失败。请写到用户级 `~/.gradle/gradle.properties`，或在命令里用
+   > `-Pandroid.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2`
+   > 传入（下方单测示例就是这么写的）。
 
 4. 运行 JVM 单元测试（Termux 示例）：
 
