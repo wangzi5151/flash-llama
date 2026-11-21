@@ -4,8 +4,26 @@ All notable changes to FlashLlama are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- README: CI / license badges, an English summary, a model download &
+  selection guide (where to get GGUF files, Q4_K_M size vs. device RAM
+  table, why split files won't load), and explicit device requirements
+  (Android 8.0+, arm64-v8a) in the usage section.
+- `CONTRIBUTING.md` (native-library build constraints, how to run the
+  JVM unit tests, what to include in issues) and `SECURITY.md`
+  (vulnerability reporting, trusted-model guidance).
+- Repository topics: android, gguf, jni, kotlin, llama-cpp, llm,
+  on-device-ai.
+
 ### Fixed
 
+- `gradle.properties` no longer hardcodes the Termux-local
+  `android.aapt2FromMavenOverride` path. That path only exists on the
+  maintainer's Termux device, so GitHub-hosted CI always failed in
+  `:app:processDebugResources` ("Specified AAPT2 executable does not
+  exist"). Termux builds now pass it via `~/.gradle/gradle.properties`
+  or `-P` on the command line, as the README's test example already did.
 - Prevent use-after-free when a model is unloaded while a generation is still
   running: `unload()` / `onCleared()` now cancel the native decode, wait for the
   in-flight JNI call, and only then call `nativeFree()`.

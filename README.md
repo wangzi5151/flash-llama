@@ -1,7 +1,18 @@
 # 极速 GGUF · FlashLlama
 
+[![Android unit tests](https://github.com/wangzi5151/flash-llama/actions/workflows/android-unit-tests.yml/badge.svg)](https://github.com/wangzi5151/flash-llama/actions/workflows/android-unit-tests.yml)
+[![Native build](https://github.com/wangzi5151/flash-llama/actions/workflows/native-build.yml/badge.svg)](https://github.com/wangzi5151/flash-llama/actions/workflows/native-build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一个轻量、原生、**速度优先**的 Android 本地大模型运行器。直接在手机上加载
 `.gguf` 模型（Llama / Qwen / DeepSeek / Phi / Gemma 等），离线推理、流式输出。
+
+> **English summary:** FlashLlama is a lightweight, speed-first Android app
+> for running GGUF models (Llama / Qwen / DeepSeek / Phi / Gemma) fully
+> on-device. It wraps llama.cpp via JNI with arm64 NEON / dotprod and CPU
+> Flash-Attention, streams tokens with live tok/s stats, loads models in
+> place through the system file picker (no copying, even for tens-of-GB
+> files), and works completely offline. arm64-v8a only; Android 8.0+.
 
 底层基于 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `libllama` +
 `libggml`，通过 JNI 调用，纯 CPU 推理并开启 arm64 NEON / DOTPROD / CPU
@@ -105,9 +116,12 @@ pkg install -y cmake ninja patchelf python openjdk-17
    ./gradlew :app:assembleRelease
    ```
 
-   > 在 Termux aarch64 上，Gradle 自带的 `aapt2`（x86_64）无法运行，需在
-   > `gradle.properties` 中设置 `android.aapt2FromMavenOverride` 指向 Termux
-   > 的 aapt2，或 `pkg install aapt`。本仓库已包含该配置。
+   > 在 Termux aarch64 上，Gradle 自带的 `aapt2`（x86_64）无法运行，需让
+   > `android.aapt2FromMavenOverride` 指向 Termux 的 aapt2。**不要写进仓库的
+   > `gradle.properties`**——那是本机路径，写死后 GitHub 托管 CI 找不到这个
+   > 文件必然失败。请写到用户级 `~/.gradle/gradle.properties`，或在命令里用
+   > `-Pandroid.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2`
+   > 传入（下方单测示例就是这么写的）。
 
 4. 运行 JVM 单元测试（Termux 示例）：
 
@@ -136,7 +150,39 @@ pkg install -y cmake ninja patchelf python openjdk-17
 
 本地只需要 JVM 单测时，无需安装 NDK 或连接设备。
 
+## 📥 模型下载与选择
+
+应用不内置模型，需要自己准备一个单文件 `.gguf`：
+
+- **去哪下**：[Hugging Face](https://huggingface.co/models?search=gguf) 上搜
+  模型名 + `GGUF`。优先选官方或知名量化仓库（如 bartowski、Qwen、Meta 的
+  GGUF 版本），下载量高、带模型卡的更稳妥。
+- **选哪个版本**：对话请选带 `Instruct` / `Chat` 字样的版本（基座模型不会
+  好好聊天）；文件名里的 `Q4_K_M` 是量化等级，本应用推荐就从它开始。
+- **分片文件不要下**：文件名带 `00001-of-00002` 的是分片模型，暂不支持
+  通过文件选择器直接加载（见「已知限制」）。
+
+量化等级与内存的粗略对应（以 Q4_K_M 为例，文件大小为约数）：
+
+| 模型规模 | Q4_K_M 文件大小 | 建议设备可用内存 |
+| --- | --- | --- |
+| 1B | ~0.8 GB | ≥ 3 GB |
+| 3B | ~2.0 GB | ≥ 4 GB |
+| 7B / 8B | ~4.7–4.9 GB | ≥ 6 GB |
+| 14B | ~9 GB | ≥ 12 GB |
+
+经验法则：运行时占用 ≈ 模型文件大小 + KV 缓存（上下文越长越大，
+可在参数里把 KV 精度降到 Q8_0 / Q4_0 省内存）。内存不够时优先换更小的
+量化（如 Q4_K_S）或更小的模型，不要硬上大模型——被系统杀掉只会更慢。
+更高量化（Q8_0、F16）质量略好但文件近乎翻倍，手机上一般不划算。
+
 ## 📱 使用
+
+设备要求：
+
+- Android 8.0（API 26）或更高；
+- `arm64-v8a` 设备（绝大多数现代 Android 手机）；
+- 内存满足上面表格里你选的模型的要求。
 
 1. 安装 APK（仅支持 `arm64-v8a`）。
 2. 点击「选择 GGUF 模型」，通过系统文件选择器选取 `.gguf` 文件（可使用 SAF，
